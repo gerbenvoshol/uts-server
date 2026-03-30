@@ -256,6 +256,10 @@ int create_response(rfc3161_context *ct, char *query, int query_len,
                 }
             }
             TS_REQ_free(ts_req);
+        } else {
+            uts_logger(ct, LOG_DEBUG,
+                       "failed to parse TS request for digest extraction,"
+                       " using default signer digest");
         }
     }
 

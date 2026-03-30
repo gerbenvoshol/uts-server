@@ -12,6 +12,165 @@
 extern int g_uts_sig_up;
 extern int g_uts_sig;
 
+/* Valid HTML5 static page served for non-timestamp requests. The content is
+ * defined here as a const char[] so that strlen() can compute the correct
+ * Content-Length at runtime, avoiding the stale hard-coded value that was
+ * previously in the STATIC_PAGE macro.  Using mg_write() instead of
+ * mg_printf() also prevents CSS percentage signs from being misinterpreted
+ * as printf format specifiers. */
+static const char STATIC_HTML[] =
+    "<!DOCTYPE html>\n"
+    "<html lang=\"en\">\n"
+    "<head>\n"
+    "  <meta charset=\"utf-8\">\n"
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+    "  <title>uts-server</title>\n"
+    "  <meta name=\"author\" content=\"Pierre-Francois Carpentier\">\n"
+    "  <meta name=\"description\" content=\"uts-server\">\n"
+    "  <link rel=\"icon\" type=\"image/x-icon\" href=\"/favicon.ico\">\n"
+    "  <style>\n"
+    "    .rcorners {\n"
+    "      border-radius: 10px;\n"
+    "      border: 2px solid #0080ff;\n"
+    "      margin: 20px;\n"
+    "      padding: 10px;\n"
+    "      box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2), 0 6px 20px 0 rgba(0,0,0,0.19);\n"
+    "      margin-left: auto;\n"
+    "      margin-right: auto;\n"
+    "      width: 40%;\n"
+    "    }\n"
+    "    body {\n"
+    "      margin: 0px;\n"
+    "    }\n"
+    "    .code {\n"
+    "      border-radius: 3px;\n"
+    "      border: 2px solid #000000;\n"
+    "      margin: 20px;\n"
+    "      padding: 10px;\n"
+    "      width: 90%;\n"
+    "      background: #404040;\n"
+    "      color: #e6e6e6;\n"
+    "      margin-left: auto;\n"
+    "      margin-right: auto;\n"
+    "    }\n"
+    "    .button {\n"
+    "      background-color: #3366ff;\n"
+    "      border: none;\n"
+    "      color: white;\n"
+    "      text-align: center;\n"
+    "      text-decoration: none;\n"
+    "      display: inline-block;\n"
+    "      font-size: 14px;\n"
+    "      margin: 4px 2px;\n"
+    "      cursor: pointer;\n"
+    "      border-radius: 2px;\n"
+    "      padding: 10px 24px;\n"
+    "      box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2), 0 6px 20px 0 rgba(0,0,0,0.19);\n"
+    "    }\n"
+    "    .desc {\n"
+    "      text-decoration: underline;\n"
+    "      text-align: center;\n"
+    "      font-size: 20px;\n"
+    "      margin-top: 20px;\n"
+    "    }\n"
+    "    .center {\n"
+    "      text-align: center;\n"
+    "    }\n"
+    "    .footer {\n"
+    "      position: fixed;\n"
+    "      bottom: 0px;\n"
+    "      padding-top: 5px;\n"
+    "      border-top: 1px solid gray;\n"
+    "      width: 100%;\n"
+    "      background-color: #f5f5f5;\n"
+    "      font-size: 14px;\n"
+    "      text-align: center;\n"
+    "    }\n"
+    "    .var {\n"
+    "      color: #99ccff;\n"
+    "    }\n"
+    "  </style>\n"
+    "</head>\n"
+    "<body>\n"
+    "  <div class=\"desc\">\n"
+    "    uts-server, a simple RFC 3161 timestamp server\n"
+    "  </div>\n"
+    "  <div class=\"rcorners\">\n"
+    "    For timestamping a file with OpenSSL and curl, run the following\n"
+    "    commands (setting the $UTS_SERVER_URL, $FILE and $FILE_TIMESTAMP\n"
+    "    variables):\n"
+    "    <div class=\"code\">\n"
+    "      openssl ts -query -data \"<span class=\"var\">$FILE</span>\""
+    " -out \"ts_req.ts\";<br>\n"
+    "      curl \"<span class=\"var\">$UTS_SERVER_URL</span>\" \\<br>\n"
+    "      &nbsp;&nbsp;&nbsp;&nbsp; -H \"Content-Type:"
+    " application/timestamp-query\" \\<br>\n"
+    "      &nbsp;&nbsp;&nbsp;&nbsp; -f -g --data-binary \"@ts_req.ts\" -o"
+    " \"<span class=\"var\">$FILE_TIMESTAMP</span>\"\n"
+    "    </div>\n"
+    "    For verifying the timestamp with OpenSSL, download the CA and the\n"
+    "    signer cert, and run the following command:\n"
+    "    <div class=\"code\">\n"
+    "      openssl ts -verify -in"
+    " \"<span class=\"var\">$FILE_TIMESTAMP</span>\" \\<br>\n"
+    "      &nbsp;&nbsp;&nbsp;&nbsp; -data"
+    " \"<span class=\"var\">$FILE</span>\""
+    " -CAfile ca.pem -untrusted tsa_cert.pem\n"
+    "    </div>\n"
+    "    <div class=\"center\">\n"
+    "      <a href=\"./ca.pem\" download>"
+    "<button class=\"button\">Download CA file</button></a>\n"
+    "      <a href=\"./tsa_cert.pem\" download>"
+    "<button class=\"button\">Download TSA cert file</button></a>\n"
+    "    </div>\n"
+    "  </div>\n"
+    "  <div class=\"footer\">\n"
+    "    <div class=\"container\">\n"
+    "      <a href=\"http://uts-server.readthedocs.org\""
+    " target=\"_blank\">uts-server</a>\n"
+    "      &bull; &copy; 2019 &bull; Pierre-Fran&ccedil;ois Carpentier"
+    " &bull; Released under the MIT License\n"
+    "    </div>\n"
+    "  </div>\n"
+    "</body>\n"
+    "</html>\n";
+
+/* Minimal 1x1 transparent ICO served at /favicon.ico.
+ * Layout: ICONDIR (6 bytes) + ICONDIRENTRY (16 bytes) +
+ *         BITMAPINFOHEADER (40 bytes) + BGRA pixel (4 bytes) +
+ *         AND mask padded to DWORD (4 bytes) = 70 bytes total. */
+static const unsigned char FAVICON_ICO[] = {
+    /* ICONDIR */
+    0x00, 0x00,             /* Reserved, must be 0        */
+    0x01, 0x00,             /* Type: 1 = ICO               */
+    0x01, 0x00,             /* Number of images: 1         */
+    /* ICONDIRENTRY */
+    0x01,                   /* Width: 1 px                 */
+    0x01,                   /* Height: 1 px                */
+    0x00,                   /* Color count: 0 (32-bit)     */
+    0x00,                   /* Reserved                    */
+    0x01, 0x00,             /* Planes: 1                   */
+    0x20, 0x00,             /* Bit count: 32               */
+    0x30, 0x00, 0x00, 0x00, /* Image data size: 48 bytes   */
+    0x16, 0x00, 0x00, 0x00, /* Image data offset: 22 bytes */
+    /* BITMAPINFOHEADER */
+    0x28, 0x00, 0x00, 0x00, /* Header size: 40             */
+    0x01, 0x00, 0x00, 0x00, /* Width: 1 px                 */
+    0x02, 0x00, 0x00, 0x00, /* Height: 2 (XOR+AND, ICO)    */
+    0x01, 0x00,             /* Planes: 1                   */
+    0x20, 0x00,             /* Bit depth: 32               */
+    0x00, 0x00, 0x00, 0x00, /* Compression: none           */
+    0x00, 0x00, 0x00, 0x00, /* Image data size: 0          */
+    0x00, 0x00, 0x00, 0x00, /* X pixels/meter: 0           */
+    0x00, 0x00, 0x00, 0x00, /* Y pixels/meter: 0           */
+    0x00, 0x00, 0x00, 0x00, /* Colors used: 0              */
+    0x00, 0x00, 0x00, 0x00, /* Important colors: 0         */
+    /* Pixel data: 1 fully transparent pixel (BGRA)        */
+    0x00, 0x00, 0x00, 0x00,
+    /* AND mask: 1 pixel padded to DWORD boundary          */
+    0x00, 0x00, 0x00, 0x00
+};
+
 static char *rand_string(char *str, size_t size) {
     const char charset[] = "1234567890ABCDEF";
     if (size) {
@@ -195,7 +354,14 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
     } else {
         // default reply if we don't have a time-stamp request
         resp_code = 200;
-        mg_printf(conn, STATIC_PAGE);
+        size_t html_len = strlen(STATIC_HTML);
+        mg_printf(conn,
+                  "HTTP/1.1 200 OK\r\n"
+                  "Content-Type: text/html; charset=utf-8\r\n"
+                  "Content-Length: %zu\r\n"
+                  "\r\n",
+                  html_len);
+        mg_write(conn, STATIC_HTML, html_len);
     }
     // initialize a serial_id if not created by create_response
     if (serial_id == NULL) {
@@ -279,6 +445,17 @@ int cert_serve_handler(struct mg_connection *conn, void *context) {
     return 1;
 }
 
+int favicon_handler(struct mg_connection *conn, void *context) {
+    mg_printf(conn,
+              "HTTP/1.1 200 OK\r\n"
+              "Content-Type: image/x-icon\r\n"
+              "Content-Length: %zu\r\n"
+              "\r\n",
+              sizeof(FAVICON_ICO));
+    mg_write(conn, FAVICON_ICO, sizeof(FAVICON_ICO));
+    return 1;
+}
+
 int http_server_start(char *conffile, char *conf_wd, bool stdout_dbg) {
     struct mg_context *ctx;
     struct mg_callbacks callbacks;
@@ -305,6 +482,7 @@ int http_server_start(char *conffile, char *conf_wd, bool stdout_dbg) {
     ctx = mg_start(&callbacks, &user_data, ct->http_options);
     if (ctx != NULL) {
         mg_set_request_handler(ctx, "/", rfc3161_handler, (void *)ct);
+        mg_set_request_handler(ctx, "/favicon.ico", favicon_handler, (void *)ct);
         mg_set_request_handler(ctx, "/ca.pem", ca_serve_handler, (void *)ct);
         mg_set_request_handler(ctx, "/tsa_cert.pem", cert_serve_handler,
                                (void *)ct);
