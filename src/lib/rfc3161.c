@@ -228,6 +228,41 @@ int create_response(rfc3161_context *ct, char *query, int query_len,
     unsigned long err_code;
     unsigned long err_code_prev = 0;
 
+    // Extract the hash algorithm from the request and use it as the signer
+    // digest so the response is signed with the same algorithm as requested.
+    {
+        const unsigned char *query_ptr = (const unsigned char *)query;
+        TS_REQ *ts_req = d2i_TS_REQ(NULL, &query_ptr, query_len);
+        if (ts_req != NULL) {
+            TS_MSG_IMPRINT *msg_imprint = TS_REQ_get_msg_imprint(ts_req);
+            if (msg_imprint != NULL) {
+                X509_ALGOR *hash_algor = NULL;
+#ifdef OPENSSL_API_1_1
+                hash_algor = TS_MSG_IMPRINT_get_algo(msg_imprint);
+#endif
+#ifdef OPENSSL_API_1_0
+                hash_algor = msg_imprint->hash_algo;
+#endif
+                if (hash_algor != NULL) {
+                    const ASN1_OBJECT *algorithm = NULL;
+                    X509_ALGOR_get0(&algorithm, NULL, NULL, hash_algor);
+                    if (algorithm != NULL) {
+                        int hash_nid = OBJ_obj2nid(algorithm);
+                        const EVP_MD *md = EVP_get_digestbynid(hash_nid);
+                        if (md != NULL) {
+                            TS_RESP_CTX_set_signer_digest(resp_ctx, md);
+                        }
+                    }
+                }
+            }
+            TS_REQ_free(ts_req);
+        } else {
+            uts_logger(ct, LOG_DEBUG,
+                       "failed to parse TS request for digest extraction,"
+                       " using default signer digest");
+        }
+    }
+
     // create the input bio for OpenSSL containing the query
     if ((query_bio = BIO_new_mem_buf(query, query_len)) == NULL) {
         uts_logger(ct, LOG_ERR, "failed to parse query");

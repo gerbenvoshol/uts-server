@@ -12,6 +12,214 @@
 extern int g_uts_sig_up;
 extern int g_uts_sig;
 
+/* Valid HTML5 static page served for non-timestamp requests. The content is
+ * defined here as a const char[] so that strlen() can compute the correct
+ * Content-Length at runtime, avoiding the stale hard-coded value that was
+ * previously in the STATIC_PAGE macro.  Using mg_write() instead of
+ * mg_printf() also prevents CSS percentage signs from being misinterpreted
+ * as printf format specifiers. */
+static const char STATIC_HTML[] =
+    "<!DOCTYPE html>\n"
+    "<html lang=\"en\">\n"
+    "<head>\n"
+    "  <meta charset=\"utf-8\">\n"
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+    "  <title>RFC 3161 Timestamp Server</title>\n"
+    "  <link rel=\"icon\" type=\"image/x-icon\" href=\"/favicon.ico\">\n"
+    "  <style>\n"
+    "    * { box-sizing: border-box; }\n"
+    "    body {\n"
+    "      margin: 0;\n"
+    "      font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\","
+    " Roboto, sans-serif;\n"
+    "      background: #f7f8fa;\n"
+    "      color: #333;\n"
+    "      line-height: 1.6;\n"
+    "    }\n"
+    "    header {\n"
+    "      background: #1a3c6e;\n"
+    "      color: #fff;\n"
+    "      padding: 24px 20px;\n"
+    "      text-align: center;\n"
+    "    }\n"
+    "    header h1 { margin: 0 0 6px; font-size: 1.8rem; }\n"
+    "    header p  { margin: 0; opacity: 0.85; }\n"
+    "    main {\n"
+    "      max-width: 860px;\n"
+    "      margin: 28px auto;\n"
+    "      padding: 0 16px 40px;\n"
+    "    }\n"
+    "    section {\n"
+    "      background: #fff;\n"
+    "      border-radius: 8px;\n"
+    "      box-shadow: 0 2px 6px rgba(0,0,0,0.08);\n"
+    "      padding: 22px 26px;\n"
+    "      margin-bottom: 20px;\n"
+    "    }\n"
+    "    h2 {\n"
+    "      margin-top: 0;\n"
+    "      font-size: 1.1rem;\n"
+    "      border-bottom: 2px solid #1a3c6e;\n"
+    "      padding-bottom: 6px;\n"
+    "      color: #1a3c6e;\n"
+    "    }\n"
+    "    p { margin: 0 0 10px; }\n"
+    "    pre {\n"
+    "      background: #1e1e2e;\n"
+    "      color: #cdd6f4;\n"
+    "      border-radius: 6px;\n"
+    "      padding: 14px 16px;\n"
+    "      overflow-x: auto;\n"
+    "      font-size: 0.875rem;\n"
+    "      line-height: 1.55;\n"
+    "      margin: 10px 0;\n"
+    "      white-space: pre;\n"
+    "    }\n"
+    "    .var     { color: #89dceb; font-style: italic; }\n"
+    "    .comment { color: #6c7086; }\n"
+    "    .btn {\n"
+    "      display: inline-block;\n"
+    "      background: #1a3c6e;\n"
+    "      color: #fff;\n"
+    "      text-decoration: none;\n"
+    "      padding: 9px 18px;\n"
+    "      border-radius: 5px;\n"
+    "      font-size: 0.875rem;\n"
+    "      margin: 8px 6px 0 0;\n"
+    "    }\n"
+    "    .grid {\n"
+    "      display: grid;\n"
+    "      grid-template-columns: 1fr 1fr;\n"
+    "      gap: 14px;\n"
+    "      margin-top: 10px;\n"
+    "    }\n"
+    "    @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }\n"
+    "    .kv strong {\n"
+    "      display: block;\n"
+    "      font-size: 0.72rem;\n"
+    "      text-transform: uppercase;\n"
+    "      letter-spacing: 0.06em;\n"
+    "      color: #666;\n"
+    "      margin-bottom: 2px;\n"
+    "    }\n"
+    "  </style>\n"
+    "</head>\n"
+    "<body>\n"
+    "  <header>\n"
+    "    <h1>RFC 3161 Timestamp Server</h1>\n"
+    "    <p>A free, open-source Time-Stamp Authority (TSA)"
+    " &mdash; RFC&nbsp;3161 compliant</p>\n"
+    "  </header>\n"
+    "  <main>\n"
+
+    "    <section>\n"
+    "      <h2>What is an RFC 3161 Timestamp?</h2>\n"
+    "      <p>An <strong>RFC 3161 timestamp</strong> provides cryptographic proof that a"
+    " piece of data existed in its exact form at a specific point in time. A trusted"
+    " <em>Time-Stamp Authority (TSA)</em> signs a hash of your data together with the"
+    " current time, producing a token you can verify later using the TSA&rsquo;s"
+    " public certificate chain.</p>\n"
+    "      <p>Common uses include timestamping signed documents and contracts, log files"
+    " at rotation time, code-signing binaries, and any workflow that requires an"
+    " unforgeable record of when data existed.</p>\n"
+    "    </section>\n"
+
+    "    <section>\n"
+    "      <h2>How to Timestamp a File</h2>\n"
+    "      <p>Use <strong>OpenSSL</strong> and <strong>curl</strong>."
+    " Replace the <span class=\"var\">highlighted</span> placeholders with your values:</p>\n"
+    "      <pre>"
+    "<span class=\"comment\"># 1. Generate a timestamp request (SHA-256)</span>\n"
+    "openssl ts -query \\\n"
+    "    -data  \"<span class=\"var\">$FILE</span>\" \\\n"
+    "    -sha256 -cert \\\n"
+    "    -out   ts_req.tsq\n"
+    "\n"
+    "<span class=\"comment\"># 2. Send the request to this server</span>\n"
+    "curl \"<span class=\"var\">$UTS_SERVER_URL</span>\" \\\n"
+    "    -H \"Content-Type: application/timestamp-query\" \\\n"
+    "    -f -g --data-binary \"@ts_req.tsq\" \\\n"
+    "    -o \"<span class=\"var\">$FILE</span>.tsr\""
+    "</pre>\n"
+    "    </section>\n"
+
+    "    <section>\n"
+    "      <h2>How to Verify a Timestamp</h2>\n"
+    "      <p>Download the CA and signer certificates below, then run:</p>\n"
+    "      <pre>"
+    "<span class=\"comment\"># Verify the timestamp response against the original file</span>\n"
+    "openssl ts -verify \\\n"
+    "    -data      \"<span class=\"var\">$FILE</span>\" \\\n"
+    "    -in        \"<span class=\"var\">$FILE</span>.tsr\" \\\n"
+    "    -CAfile    ca.pem \\\n"
+    "    -untrusted tsa_cert.pem\n"
+    "\n"
+    "<span class=\"comment\"># Inspect the timestamp token content</span>\n"
+    "openssl ts -reply -in \"<span class=\"var\">$FILE</span>.tsr\" -text"
+    "</pre>\n"
+    "      <a class=\"btn\" href=\"./ca.pem\" download>Download CA Certificate</a>\n"
+    "      <a class=\"btn\" href=\"./tsa_cert.pem\" download>"
+    "Download TSA Certificate</a>\n"
+    "    </section>\n"
+
+    "    <section>\n"
+    "      <h2>Service Information</h2>\n"
+    "      <div class=\"grid\">\n"
+    "        <div class=\"kv\"><strong>Protocol</strong>"
+    "RFC 3161 Time-Stamp Protocol (TSP)</div>\n"
+    "        <div class=\"kv\"><strong>Transport</strong>"
+    "HTTP POST to this URL</div>\n"
+    "        <div class=\"kv\"><strong>Request Content-Type</strong>"
+    "application/timestamp-query</div>\n"
+    "        <div class=\"kv\"><strong>Response Content-Type</strong>"
+    "application/timestamp-reply</div>\n"
+    "        <div class=\"kv\"><strong>Accepted Hash Algorithms</strong>"
+    "SHA-256, SHA-384, SHA-512</div>\n"
+    "        <div class=\"kv\"><strong>Software</strong>"
+    "uts-server (MIT License, open source)</div>\n"
+    "      </div>\n"
+    "    </section>\n"
+
+    "  </main>\n"
+    "</body>\n"
+    "</html>\n";
+
+/* Minimal 1x1 transparent ICO served at /favicon.ico.
+ * Layout: ICONDIR (6 bytes) + ICONDIRENTRY (16 bytes) +
+ *         BITMAPINFOHEADER (40 bytes) + BGRA pixel (4 bytes) +
+ *         AND mask padded to DWORD (4 bytes) = 70 bytes total. */
+static const unsigned char FAVICON_ICO[] = {
+    /* ICONDIR */
+    0x00, 0x00,             /* Reserved, must be 0        */
+    0x01, 0x00,             /* Type: 1 = ICO               */
+    0x01, 0x00,             /* Number of images: 1         */
+    /* ICONDIRENTRY */
+    0x01,                   /* Width: 1 px                 */
+    0x01,                   /* Height: 1 px                */
+    0x00,                   /* Color count: 0 (32-bit)     */
+    0x00,                   /* Reserved                    */
+    0x01, 0x00,             /* Planes: 1                   */
+    0x20, 0x00,             /* Bit count: 32               */
+    0x30, 0x00, 0x00, 0x00, /* Image data size: 48 bytes   */
+    0x16, 0x00, 0x00, 0x00, /* Image data offset: 22 bytes */
+    /* BITMAPINFOHEADER */
+    0x28, 0x00, 0x00, 0x00, /* Header size: 40             */
+    0x01, 0x00, 0x00, 0x00, /* Width: 1 px                 */
+    0x02, 0x00, 0x00, 0x00, /* Height: 2 (XOR+AND, ICO)    */
+    0x01, 0x00,             /* Planes: 1                   */
+    0x20, 0x00,             /* Bit depth: 32               */
+    0x00, 0x00, 0x00, 0x00, /* Compression: none           */
+    0x00, 0x00, 0x00, 0x00, /* Image data size: 0          */
+    0x00, 0x00, 0x00, 0x00, /* X pixels/meter: 0           */
+    0x00, 0x00, 0x00, 0x00, /* Y pixels/meter: 0           */
+    0x00, 0x00, 0x00, 0x00, /* Colors used: 0              */
+    0x00, 0x00, 0x00, 0x00, /* Important colors: 0         */
+    /* Pixel data: 1 fully transparent pixel (BGRA)        */
+    0x00, 0x00, 0x00, 0x00,
+    /* AND mask: 1 pixel padded to DWORD boundary          */
+    0x00, 0x00, 0x00, 0x00
+};
+
 static char *rand_string(char *str, size_t size) {
     const char charset[] = "1234567890ABCDEF";
     if (size) {
@@ -195,7 +403,14 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
     } else {
         // default reply if we don't have a time-stamp request
         resp_code = 200;
-        mg_printf(conn, STATIC_PAGE);
+        size_t html_len = strlen(STATIC_HTML);
+        mg_printf(conn,
+                  "HTTP/1.1 200 OK\r\n"
+                  "Content-Type: text/html; charset=utf-8\r\n"
+                  "Content-Length: %zu\r\n"
+                  "\r\n",
+                  html_len);
+        mg_write(conn, STATIC_HTML, html_len);
     }
     // initialize a serial_id if not created by create_response
     if (serial_id == NULL) {
@@ -279,6 +494,17 @@ int cert_serve_handler(struct mg_connection *conn, void *context) {
     return 1;
 }
 
+int favicon_handler(struct mg_connection *conn, void *context) {
+    mg_printf(conn,
+              "HTTP/1.1 200 OK\r\n"
+              "Content-Type: image/x-icon\r\n"
+              "Content-Length: %zu\r\n"
+              "\r\n",
+              sizeof(FAVICON_ICO));
+    mg_write(conn, FAVICON_ICO, sizeof(FAVICON_ICO));
+    return 1;
+}
+
 int http_server_start(char *conffile, char *conf_wd, bool stdout_dbg) {
     struct mg_context *ctx;
     struct mg_callbacks callbacks;
@@ -305,6 +531,7 @@ int http_server_start(char *conffile, char *conf_wd, bool stdout_dbg) {
     ctx = mg_start(&callbacks, &user_data, ct->http_options);
     if (ctx != NULL) {
         mg_set_request_handler(ctx, "/", rfc3161_handler, (void *)ct);
+        mg_set_request_handler(ctx, "/favicon.ico", favicon_handler, (void *)ct);
         mg_set_request_handler(ctx, "/ca.pem", ca_serve_handler, (void *)ct);
         mg_set_request_handler(ctx, "/tsa_cert.pem", cert_serve_handler,
                                (void *)ct);
