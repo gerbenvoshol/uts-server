@@ -303,8 +303,8 @@ end:
         serial_hex = BN_bn2hex(serial_bn);
         BN_free(serial_bn);
     } else {
-        serial_hex = calloc(SERIAL_ID_SIZE, sizeof(char));
-        strncpy(serial_hex, " NO ID   ", SERIAL_ID_SIZE + 4);
+        serial_hex = calloc(SERIAL_ID_SIZE + 1, sizeof(char));
+        strncpy(serial_hex, " NO ID  ", SERIAL_ID_SIZE);
     }
 #endif
 #ifdef OPENSSL_API_1_0
@@ -315,8 +315,8 @@ end:
         serial_hex = BN_bn2hex(serial_bn);
         BN_free(serial_bn);
     } else {
-        serial_hex = calloc(SERIAL_ID_SIZE, sizeof(char));
-        strncpy(serial_hex, " NO ID   ", SERIAL_ID_SIZE + 2);
+        serial_hex = calloc(SERIAL_ID_SIZE + 1, sizeof(char));
+        strncpy(serial_hex, " NO ID  ", SERIAL_ID_SIZE);
     }
 #endif
 

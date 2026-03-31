@@ -1,5 +1,6 @@
 #include "http.h"
 #include <civetweb.h>
+#include <openssl/rand.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,11 @@
 #include <sys/syslog.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Maximum allowed size of a timestamp query body (64 KiB).
+ * A well-formed RFC 3161 TimeStampReq is never more than a few hundred bytes;
+ * this generous cap prevents memory-exhaustion via a crafted Content-Length. */
+#define MAX_QUERY_SIZE (64 * 1024)
 
 extern int g_uts_sig_up;
 extern int g_uts_sig;
@@ -222,13 +228,17 @@ static const unsigned char FAVICON_ICO[] = {
 
 static char *rand_string(char *str, size_t size) {
     const char charset[] = "1234567890ABCDEF";
-    if (size) {
-        --size;
-        for (size_t n = 0; n < size; n++) {
-            int key = rand() % (int)(sizeof charset - 1);
-            str[n] = charset[key];
+    if (size > 1) {
+        size_t n = size - 1;
+        unsigned char *randbuf = calloc(n, sizeof(unsigned char));
+        if (randbuf != NULL) {
+            RAND_bytes(randbuf, (int)n);
+            for (size_t i = 0; i < n; i++) {
+                str[i] = charset[randbuf[i] % (sizeof charset - 1)];
+            }
+            free(randbuf);
         }
-        str[size] = '\0';
+        str[n] = '\0';
     }
     return str;
 }
@@ -346,6 +356,21 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
     //
     // If it's a time-stamp query.
     if (is_tsq) {
+        // Reject requests with a missing, zero, or oversized body to prevent
+        // memory exhaustion (DoS via a crafted Content-Length header).
+        if (request_info->content_length <= 0 ||
+            request_info->content_length > MAX_QUERY_SIZE) {
+            uts_logger(ct, LOG_WARNING,
+                       "Rejected request: invalid content_length %ld",
+                       (long)request_info->content_length);
+            mg_printf(conn, "HTTP/1.1 400 Bad Request\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Content-Length: 12\r\n"
+                            "\r\n"
+                            "client error");
+            resp_code = 400;
+            goto log_and_return;
+        }
         // Recover query content from http request.
         char *query = calloc(request_info->content_length, sizeof(char));
         int query_len = mg_read(conn, query, request_info->content_length);
@@ -412,12 +437,13 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
                   html_len);
         mg_write(conn, STATIC_HTML, html_len);
     }
+
+log_and_return:
     // initialize a serial_id if not created by create_response
     if (serial_id == NULL) {
         serial_id = calloc(9, sizeof(char));
         serial_id = rand_string(serial_id, 8);
     }
-
     // some debugging logs
     log_request_debug(request_info, serial_id, ct);
     // end of some timer stuff

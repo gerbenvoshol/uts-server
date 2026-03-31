@@ -1,36 +1,23 @@
 uts-server
 ==========
 
-.. image:: https://github.com/kakwa/uts-server/blob/master/docs/assets/logo_64.png?raw=true
+.. image:: https://github.com/gerbenvoshol/uts-server/blob/master/docs/assets/logo_64.png?raw=true
 
 |
 
-.. image:: https://travis-ci.org/kakwa/uts-server.svg?branch=master
-    :target: https://travis-ci.org/kakwa/uts-server
-
-.. image:: https://readthedocs.org/projects/uts-server/badge/?version=latest
-    :target: http://uts-server.readthedocs.org/en/latest/?badge=latest
-    :alt: Documentation Status
-
-.. image:: https://jenkins.kakwalab.ovh/buildStatus/icon?job=kakwa/uts-server/master
-    :target: https://jenkins.kakwalab.ovh/blue/organizations/jenkins/kakwa%2Futs-server/branches/
-    :alt: Jenkins Status
+.. image:: https://github.com/gerbenvoshol/uts-server/actions/workflows/ci.yml/badge.svg
+    :target: https://github.com/gerbenvoshol/uts-server/actions
 
 Micro `RFC 3161 Time-Stamp <https://www.ietf.org/rfc/rfc3161.txt>`_ server written in C.
 
 ----
 
 :Doc:    `Uts-Server documentation on ReadTheDoc <http://uts-server.readthedocs.org/en/latest/>`_
-:Dev:    `Uts-Server source code on GitHub <https://github.com/kakwa/uts-server>`_
+:Dev:    `Uts-Server source code on GitHub <https://github.com/gerbenvoshol/uts-server>`_
 :License: MIT
 :Author:  Pierre-Francois Carpentier - copyright © 2019
 
 ----
-
-Demo
-----
-
-A demo is accessible here: https://uts-server.kakwalab.ovh/
 
 License
 -------
