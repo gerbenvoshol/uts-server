@@ -2,6 +2,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -268,6 +271,68 @@ static CONF *load_config_file(rfc3161_context *ct, const char *filename) {
     return NULL;
 }
 
+/*
+ * Compute the Base64-encoded SHA-256 SubjectPublicKeyInfo (SPKI) pin for the
+ * X.509 certificate at cert_file.  This is the same algorithm used by HPKP
+ * (RFC 7469).  pin_out must point to a buffer of at least 48 bytes.
+ * Returns 1 on success, 0 on any error.
+ */
+int compute_spki_pin(const char *cert_file, char *pin_out, size_t pin_out_len) {
+    X509 *cert = NULL;
+    EVP_PKEY *pkey = NULL;
+    unsigned char *spki_der = NULL;
+    int spki_len = 0;
+    unsigned char sha256[EVP_MAX_MD_SIZE];
+    unsigned int sha256_len = 0;
+    unsigned char b64[EVP_ENCODE_LENGTH(EVP_MAX_MD_SIZE) + 1];
+    int b64_len = 0;
+    int ret = 0;
+
+    if (cert_file == NULL || cert_file[0] == '\0' || pin_out == NULL)
+        return 0;
+
+    FILE *fp = fopen(cert_file, "r");
+    if (fp == NULL)
+        return 0;
+
+    cert = PEM_read_X509(fp, NULL, NULL, NULL);
+    fclose(fp);
+    if (cert == NULL)
+        goto cleanup;
+
+    /* Extract the public key */
+    pkey = X509_get_pubkey(cert);
+    if (pkey == NULL)
+        goto cleanup;
+
+    /* DER-encode the SubjectPublicKeyInfo structure */
+    spki_len = i2d_PUBKEY(pkey, &spki_der);
+    if (spki_len <= 0 || spki_der == NULL)
+        goto cleanup;
+
+    /* SHA-256 hash of the DER-encoded SPKI */
+    if (EVP_Digest(spki_der, (size_t)spki_len, sha256, &sha256_len,
+                   EVP_sha256(), NULL) != 1)
+        goto cleanup;
+
+    /* Base64-encode the raw digest */
+    b64_len = EVP_EncodeBlock(b64, sha256, (int)sha256_len);
+    if (b64_len <= 0 || (size_t)b64_len >= pin_out_len)
+        goto cleanup;
+
+    memcpy(pin_out, b64, (size_t)b64_len);
+    pin_out[(size_t)b64_len] = '\0';
+    ret = 1;
+
+cleanup:
+    /* Wipe the intermediate SHA-256 digest from the stack */
+    OPENSSL_cleanse(sha256, sizeof(sha256));
+    OPENSSL_free(spki_der);
+    EVP_PKEY_free(pkey);
+    X509_free(cert);
+    return ret;
+}
+
 // initialize the rfc3161_context according to the conf_file content
 int set_params(rfc3161_context *ct, char *conf_file, char *conf_wd) {
     // chdir in configuration file directory
@@ -391,6 +456,16 @@ int set_params(rfc3161_context *ct, char *conf_file, char *conf_wd) {
     ct->cert_file = calloc(PATH_MAX, sizeof(char));
     realpath(NCONF_get_string(ct->conf, TSA_SECTION, "signer_cert"),
              ct->cert_file);
+
+    /* Pre-compute the HPKP pin from the TSA signing certificate so it can be
+     * included in HTTP responses without per-request file I/O. */
+    if (compute_spki_pin(ct->cert_file, ct->hpkp_pin, sizeof(ct->hpkp_pin))) {
+        uts_logger(ct, LOG_NOTICE, "HPKP pin (signer cert): %s", ct->hpkp_pin);
+    } else {
+        ct->hpkp_pin[0] = '\0';
+        uts_logger(ct, LOG_INFO,
+                   "HPKP pin could not be computed (signer cert not available)");
+    }
 
     // like any good daemon, return to '/' once the configuration is loaded
     chdir("/");

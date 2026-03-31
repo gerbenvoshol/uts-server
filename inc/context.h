@@ -48,6 +48,11 @@ typedef struct {
     char *cust_conf[20];
     char *ca_file;
     char *cert_file;
+
+    /* Base64-encoded SHA-256 SPKI pin of the TSA signing cert, computed at
+     * startup.  Used in the Public-Key-Pins response header (HPKP).
+     * Empty string when the cert could not be read. */
+    char hpkp_pin[48];
 } rfc3161_context;
 
 // definition of structure to describe

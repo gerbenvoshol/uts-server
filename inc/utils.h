@@ -18,3 +18,9 @@ int set_params(rfc3161_context *ct, char *conf_file, char *conf_wd);
 static char *rand_string(char *str, size_t size);
 void free_uts_context(rfc3161_context *ct);
 const char *null_undef(const char *in);
+
+/* Compute the Base64-encoded SHA-256 SPKI fingerprint ("HPKP pin") from a
+ * PEM-encoded X.509 certificate file.  Writes the null-terminated Base64
+ * string into pin_out (which must have at least 48 bytes of space).
+ * Returns 1 on success, 0 on any error. */
+int compute_spki_pin(const char *cert_file, char *pin_out, size_t pin_out_len);

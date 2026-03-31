@@ -521,6 +521,112 @@ Each request generates a one-liner at ``info`` level:
 The ``Request[...]`` field is a prefix derived from the timestamp serial number and
 can be used to correlate debug lines with the request log entry.
 
+Security response headers
+-------------------------
+
+uts-server automatically injects the following HTTP security headers into **every**
+response, regardless of the endpoint or HTTP method:
+
++-----------------------------------+-------------------------------------------------+
+| Header                            | Value / Purpose                                 |
++===================================+=================================================+
+| ``X-Content-Type-Options``        | ``nosniff`` — prevents MIME-type sniffing       |
++-----------------------------------+-------------------------------------------------+
+| ``X-Frame-Options``               | ``DENY`` — blocks clickjacking via iframe       |
++-----------------------------------+-------------------------------------------------+
+| ``Referrer-Policy``               | ``no-referrer`` — suppresses Referer leakage    |
++-----------------------------------+-------------------------------------------------+
+| ``Content-Security-Policy``       | ``default-src 'none'; style-src 'unsafe-inline``|
+|                                   | `` '`` — allows only inline styles (needed for  |
+|                                   | the built-in status page), blocks all external  |
+|                                   | resources and scripts                           |
++-----------------------------------+-------------------------------------------------+
+| ``Cache-Control``                 | ``no-store`` — prevents caching of timestamp    |
+|                                   | tokens and certificate downloads                |
++-----------------------------------+-------------------------------------------------+
+
+The following two headers are sent **only on HTTPS connections** (``is_ssl = 1``):
+
+HTTP Strict Transport Security (HSTS)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. sourcecode:: text
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+HSTS instructs browsers to always use HTTPS for the hostname (and all subdomains)
+for the next year.  This mitigates protocol-downgrade and cookie-hijacking attacks.
+
+.. note::
+
+    HSTS only takes effect when the server terminates TLS directly
+    (``ssl_certificate`` set in ``[ main ]``) or when a TLS-terminating reverse
+    proxy forwards the header.  Browsers ignore HSTS on plain HTTP connections.
+
+HTTP Public Key Pinning (HPKP)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. sourcecode:: text
+
+    Public-Key-Pins: pin-sha256="<base64-SPKI>"; max-age=2592000
+
+HPKP pins the SHA-256 hash of the TSA signing certificate's
+*SubjectPublicKeyInfo* (SPKI).  A browser that has seen this pin will reject any
+future TLS certificate chain that does not include a matching key, even if it was
+issued by a trusted CA — thereby mitigating attacks that use fraudulently issued
+certificates.
+
+The pin is computed automatically at startup from the ``signer_cert`` configured in
+``[ tsa ]`` and is logged at ``NOTICE`` level so you can verify it:
+
+.. sourcecode:: text
+
+    LOG_NOTICE: HPKP pin (signer cert): LvpE2hxZwgsM4gjhEhaNTUdQxVmO2wdk6f6lWvSjAXw=
+
+You can cross-check the pin with OpenSSL:
+
+.. sourcecode:: bash
+
+    openssl x509 -in /etc/uts-server/pki/tsacert.pem -pubkey -noout \
+        | openssl pkey -pubin -outform DER \
+        | openssl dgst -sha256 -binary \
+        | base64
+
+.. warning::
+
+    HPKP is powerful but risky.  If you rotate the signing key **without** first
+    advertising the new pin alongside the old one, clients that have cached the
+    old pin will be locked out for ``max-age`` seconds.  Always:
+
+    * Pre-pin the replacement key at least ``max-age`` seconds before the old
+      certificate expires.
+    * Keep an offline backup pin (generated from a backup key pair) and add it
+      as a second ``pin-sha256`` value before the primary pin expires.
+    * Start with a low ``max-age`` (e.g. 300 s) and only increase it once you
+      have verified everything works correctly.
+
+    HPKP (RFC 7469) has been removed from most browsers by default, but it
+    remains supported in several enterprise and embedded HTTP clients that
+    interact with TSAs.
+
+Verifying headers with curl
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. sourcecode:: bash
+
+    curl -Isv http://tsa.example.com:318/ 2>&1 | grep "< "
+    # Expected (HTTP):
+    # < X-Content-Type-Options: nosniff
+    # < X-Frame-Options: DENY
+    # < Referrer-Policy: no-referrer
+    # < Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'
+    # < Cache-Control: no-store
+
+    curl -Isv https://tsa.example.com:3161/ 2>&1 | grep "< "
+    # Expected (HTTPS — additional headers):
+    # < Strict-Transport-Security: max-age=31536000; includeSubDomains
+    # < Public-Key-Pins: pin-sha256="..."; max-age=2592000
+
 Troubleshooting
 ---------------
 

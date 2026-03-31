@@ -1,11 +1,13 @@
 #include "http.h"
 #include <civetweb.h>
+#include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <sys/syslog.h>
 #include <time.h>
 #include <unistd.h>
@@ -323,6 +325,90 @@ void log_request(const struct mg_request_info *request_info, char *request_id,
                null_undef(content_type));
 }
 
+/*
+ * Append security-hardening HTTP response headers to an in-progress response.
+ * Call AFTER the status line and content-specific headers but BEFORE the
+ * blank line (\r\n) that ends the header block.
+ *
+ * Headers sent on every response:
+ *   X-Content-Type-Options  – prevent MIME-type sniffing
+ *   X-Frame-Options         – deny framing (clickjacking protection)
+ *   Referrer-Policy         – suppress Referer on outbound navigations
+ *   Content-Security-Policy – restrict resource origins; allow inline styles
+ *                             (needed for the built-in HTML status page)
+ *   Cache-Control           – do not cache responses (each TS reply is unique)
+ *
+ * Headers sent only when the connection is already TLS (is_ssl != 0):
+ *   Strict-Transport-Security – HSTS: instruct browsers to always use HTTPS
+ *   Public-Key-Pins           – HPKP: pin the TSA signing cert's SPKI so that
+ *                               fake certificates issued by a rogue CA are
+ *                               rejected by the browser (only when a pin was
+ *                               computed successfully at startup)
+ */
+static void add_security_headers(struct mg_connection *conn,
+                                 const rfc3161_context *ct) {
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+
+    mg_printf(conn,
+              "X-Content-Type-Options: nosniff\r\n"
+              "X-Frame-Options: DENY\r\n"
+              "Referrer-Policy: no-referrer\r\n"
+              "Content-Security-Policy: default-src 'none';"
+              " style-src 'unsafe-inline'\r\n"
+              "Cache-Control: no-store\r\n");
+
+    if (ri->is_ssl) {
+        /* HSTS: one year, apply to all subdomains */
+        mg_printf(conn,
+                  "Strict-Transport-Security:"
+                  " max-age=31536000; includeSubDomains\r\n");
+
+        /* HPKP: 30-day pin of the TSA signing certificate's SPKI */
+        if (ct->hpkp_pin[0] != '\0') {
+            mg_printf(conn,
+                      "Public-Key-Pins:"
+                      " pin-sha256=\"%s\"; max-age=2592000\r\n",
+                      ct->hpkp_pin);
+        }
+    }
+}
+
+/*
+ * Open a regular file and stream it as an HTTP 200 response with the given
+ * Content-Type, injecting all security headers.  Returns 1 if the file was
+ * served, 0 if it could not be opened (caller should send a 404).
+ */
+static int serve_file_with_headers(struct mg_connection *conn,
+                                   const rfc3161_context *ct,
+                                   const char *filename,
+                                   const char *content_type,
+                                   const char *disposition_name) {
+    struct stat st;
+    if (stat(filename, &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+
+    FILE *f = fopen(filename, "rb");
+    if (f == NULL)
+        return 0;
+
+    mg_printf(conn,
+              "HTTP/1.1 200 OK\r\n"
+              "Content-Type: %s\r\n"
+              "Content-Disposition: attachment; filename=\"%s\"\r\n"
+              "Content-Length: %lld\r\n",
+              content_type, disposition_name, (long long)st.st_size);
+    add_security_headers(conn, ct);
+    mg_printf(conn, "\r\n");
+
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        mg_write(conn, buf, n);
+
+    fclose(f);
+    return 1;
+}
+
 int rfc3161_handler(struct mg_connection *conn, void *context) {
     // some timer stuff
     clock_t start = clock(), diff;
@@ -365,9 +451,9 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
                        (long)request_info->content_length);
             mg_printf(conn, "HTTP/1.1 400 Bad Request\r\n"
                             "Content-Type: text/plain\r\n"
-                            "Content-Length: 12\r\n"
-                            "\r\n"
-                            "client error");
+                            "Content-Length: 12\r\n");
+            add_security_headers(conn, ct);
+            mg_printf(conn, "\r\nclient error");
             resp_code = 400;
             goto log_and_return;
         }
@@ -402,9 +488,10 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
             mg_printf(conn,
                       "HTTP/1.1 200 OK\r\n"
                       "Content-Type: application/timestamp-reply\r\n"
-                      "Content-Length: %d\r\n"
-                      "\r\n",
+                      "Content-Length: %d\r\n",
                       (int)content_length);
+            add_security_headers(conn, ct);
+            mg_printf(conn, "\r\n");
             mg_write(conn, content, content_length);
             log_hex(ct, LOG_DEBUG, "response hexdump content", content,
                     content_length);
@@ -412,17 +499,18 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
         case 400:
             mg_printf(conn, "HTTP/1.1 400 Bad Request\r\n"
                             "Content-Type: text/plain\r\n"
-                            "Content-Length: 12\r\n"
-                            "\r\n"
-                            "client error");
+                            "Content-Length: 12\r\n");
+            add_security_headers(conn, ct);
+            mg_printf(conn, "\r\nclient error");
             break;
         default:
             mg_printf(conn, "HTTP/1.1 500 Internal Server Error\r\n"
                             "Content-Type: text/plain\r\n"
-                            "Content-Length: 17\r\n"
-                            "\r\n"
-                            "uts-server error");
+                            "Content-Length: 17\r\n");
+            add_security_headers(conn, ct);
+            mg_printf(conn, "\r\nuts-server error");
         }
+        OPENSSL_cleanse(query, (size_t)query_len);
         free(query);
         free(content);
     } else {
@@ -432,9 +520,10 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
         mg_printf(conn,
                   "HTTP/1.1 200 OK\r\n"
                   "Content-Type: text/html; charset=utf-8\r\n"
-                  "Content-Length: %zu\r\n"
-                  "\r\n",
+                  "Content-Length: %zu\r\n",
                   html_len);
+        add_security_headers(conn, ct);
+        mg_printf(conn, "\r\n");
         mg_write(conn, STATIC_HTML, html_len);
     }
 
@@ -456,11 +545,11 @@ log_and_return:
 }
 
 int ca_serve_handler(struct mg_connection *conn, void *context) {
-    /* In this handler, we ignore the req_info and send the file "filename". */
     const struct mg_request_info *request_info = mg_get_request_info(conn);
     clock_t start = clock(), diff;
     rfc3161_context *ct = (rfc3161_context *)context;
     const char *filename = ct->ca_file;
+
     if (strlen(filename) == 0) {
         uts_logger(context, LOG_NOTICE,
                    "'certs' param in '[ tsa ]' section not filed");
@@ -470,13 +559,12 @@ int ca_serve_handler(struct mg_connection *conn, void *context) {
                     (diff * 1000000 / CLOCKS_PER_SEC));
         return 1;
     }
-    if (access(filename, F_OK) != -1) {
-        mg_send_file(conn, filename);
-        const struct mg_response_info *ri = mg_get_response_info(conn);
+
+    if (serve_file_with_headers(conn, ct, filename,
+                                "application/x-pem-file", "ca.pem")) {
         diff = clock() - start;
         log_request(request_info, "CA_DL  ", ct, 200,
                     (diff * 1000000 / CLOCKS_PER_SEC));
-
     } else {
         uts_logger(context, LOG_NOTICE, "CA file '%s' not available", filename);
         mg_send_http_error(conn, 404, "CA file not available");
@@ -488,31 +576,30 @@ int ca_serve_handler(struct mg_connection *conn, void *context) {
 }
 
 int cert_serve_handler(struct mg_connection *conn, void *context) {
-    /* In this handler, we ignore the req_info and send the file "filename". */
     const struct mg_request_info *request_info = mg_get_request_info(conn);
     clock_t start = clock(), diff;
     rfc3161_context *ct = (rfc3161_context *)context;
     const char *filename = ct->cert_file;
+
     if (strlen(filename) == 0) {
         uts_logger(context, LOG_NOTICE,
                    "'signer_cert' param in '[ tsa ]' section not filed");
-        mg_send_http_error(conn, 404, "CA file not available");
+        mg_send_http_error(conn, 404, "Signer certificate not available");
         diff = clock() - start;
         log_request(request_info, "CERT_DL", ct, 404,
                     (diff * 1000000 / CLOCKS_PER_SEC));
         return 1;
     }
-    if (access(filename, F_OK) != -1) {
-        mg_send_file(conn, filename);
-        const struct mg_response_info *ri = mg_get_response_info(conn);
+
+    if (serve_file_with_headers(conn, ct, filename,
+                                "application/x-pem-file", "tsa_cert.pem")) {
         diff = clock() - start;
         log_request(request_info, "CERT_DL", ct, 200,
                     (diff * 1000000 / CLOCKS_PER_SEC));
-
     } else {
         uts_logger(context, LOG_NOTICE,
-                   "signer certificate file '%s' not available", filename);
-        mg_send_http_error(conn, 404, "CA file not available");
+                   "Signer certificate file '%s' not available", filename);
+        mg_send_http_error(conn, 404, "Signer certificate not available");
         diff = clock() - start;
         log_request(request_info, "CERT_DL", ct, 404,
                     (diff * 1000000 / CLOCKS_PER_SEC));
@@ -521,12 +608,14 @@ int cert_serve_handler(struct mg_connection *conn, void *context) {
 }
 
 int favicon_handler(struct mg_connection *conn, void *context) {
+    rfc3161_context *ct = (rfc3161_context *)context;
     mg_printf(conn,
               "HTTP/1.1 200 OK\r\n"
               "Content-Type: image/x-icon\r\n"
-              "Content-Length: %zu\r\n"
-              "\r\n",
+              "Content-Length: %zu\r\n",
               sizeof(FAVICON_ICO));
+    add_security_headers(conn, ct);
+    mg_printf(conn, "\r\n");
     mg_write(conn, FAVICON_ICO, sizeof(FAVICON_ICO));
     return 1;
 }
