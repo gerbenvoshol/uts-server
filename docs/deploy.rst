@@ -537,7 +537,7 @@ response, regardless of the endpoint or HTTP method:
 | ``Referrer-Policy``               | ``no-referrer`` — suppresses Referer leakage    |
 +-----------------------------------+-------------------------------------------------+
 | ``Content-Security-Policy``       | ``default-src 'none'; style-src 'unsafe-inline``|
-|                                   | `` '`` — allows only inline styles (needed for  |
+|                                   | ``'`` — allows only inline styles (needed for   |
 |                                   | the built-in status page), blocks all external  |
 |                                   | resources and scripts                           |
 +-----------------------------------+-------------------------------------------------+
@@ -545,7 +545,7 @@ response, regardless of the endpoint or HTTP method:
 |                                   | tokens and certificate downloads                |
 +-----------------------------------+-------------------------------------------------+
 
-The following two headers are sent **only on HTTPS connections** (``is_ssl = 1``):
+The following header is sent **only on HTTPS connections** (``is_ssl = 1``):
 
 HTTP Strict Transport Security (HSTS)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -554,60 +554,51 @@ HTTP Strict Transport Security (HSTS)
 
     Strict-Transport-Security: max-age=31536000; includeSubDomains
 
-HSTS instructs browsers to always use HTTPS for the hostname (and all subdomains)
+HSTS instructs clients to always use HTTPS for the hostname (and all subdomains)
 for the next year.  This mitigates protocol-downgrade and cookie-hijacking attacks.
 
 .. note::
 
     HSTS only takes effect when the server terminates TLS directly
     (``ssl_certificate`` set in ``[ main ]``) or when a TLS-terminating reverse
-    proxy forwards the header.  Browsers ignore HSTS on plain HTTP connections.
+    proxy forwards the header.  HSTS is ignored on plain HTTP connections.
 
-HTTP Public Key Pinning (HPKP)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Why HPKP is not implemented
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. sourcecode:: text
+HTTP Public Key Pinning (HPKP, RFC 7469) was explicitly considered and
+**intentionally left out** for the following reasons:
 
-    Public-Key-Pins: pin-sha256="<base64-SPKI>"; max-age=2592000
+1. **It has no audience in the TSA context.**  HPKP was removed from Chrome 72
+   (January 2019) and is disabled by default in Firefox.  The clients that actually
+   talk to a TSA — ``openssl ts``, ``curl``, Java BouncyCastle, .NET
+   ``System.Security.Cryptography``, Windows ``signtool`` — have never implemented
+   it.  A header that nothing enforces provides zero security benefit.
 
-HPKP pins the SHA-256 hash of the TSA signing certificate's
-*SubjectPublicKeyInfo* (SPKI).  A browser that has seen this pin will reject any
-future TLS certificate chain that does not include a matching key, even if it was
-issued by a trusted CA — thereby mitigating attacks that use fraudulently issued
-certificates.
+2. **The risk–benefit ratio is inverted.**  A misconfigured or forgotten pin with a
+   long ``max-age`` value can permanently lock out every client that *does* honour it,
+   with no recovery path short of waiting for the pin to expire.  RFC 7469 itself
+   lists "hostile pinning" as a primary threat vector.
 
-The pin is computed automatically at startup from the ``signer_cert`` configured in
-``[ tsa ]`` and is logged at ``NOTICE`` level so you can verify it:
+3. **Better alternatives exist for the same threat model** (a rogue CA issuing a
+   fraudulent certificate for your TSA hostname):
 
-.. sourcecode:: text
+   * **CAA DNS records** — restrict which certificate authorities are permitted to
+     issue certificates for your domain:
 
-    LOG_NOTICE: HPKP pin (signer cert): LvpE2hxZwgsM4gjhEhaNTUdQxVmO2wdk6f6lWvSjAXw=
+     .. sourcecode:: text
 
-You can cross-check the pin with OpenSSL:
+         tsa.example.com. IN CAA 0 issue "letsencrypt.org"
+         tsa.example.com. IN CAA 0 issuewild ";"
 
-.. sourcecode:: bash
+   * **Certificate Transparency (CT) monitoring** — enrol in a CT log monitoring
+     service (e.g. `crt.sh <https://crt.sh>`_) to receive alerts when any CA
+     issues a certificate for your hostname.
 
-    openssl x509 -in /etc/uts-server/pki/tsacert.pem -pubkey -noout \
-        | openssl pkey -pubin -outform DER \
-        | openssl dgst -sha256 -binary \
-        | base64
-
-.. warning::
-
-    HPKP is powerful but risky.  If you rotate the signing key **without** first
-    advertising the new pin alongside the old one, clients that have cached the
-    old pin will be locked out for ``max-age`` seconds.  Always:
-
-    * Pre-pin the replacement key at least ``max-age`` seconds before the old
-      certificate expires.
-    * Keep an offline backup pin (generated from a backup key pair) and add it
-      as a second ``pin-sha256`` value before the primary pin expires.
-    * Start with a low ``max-age`` (e.g. 300 s) and only increase it once you
-      have verified everything works correctly.
-
-    HPKP (RFC 7469) has been removed from most browsers by default, but it
-    remains supported in several enterprise and embedded HTTP clients that
-    interact with TSAs.
+   * **Explicit trust anchors in clients** — TSA clients should be configured with
+     the specific CA certificate (``-CAfile /etc/uts-server/pki/tsaca.pem``) rather
+     than relying on the system trust store.  This is a far stronger guarantee than
+     HPKP because it works independently of browser support.
 
 Verifying headers with curl
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -625,7 +616,6 @@ Verifying headers with curl
     curl -Isv https://tsa.example.com:3161/ 2>&1 | grep "< "
     # Expected (HTTPS — additional headers):
     # < Strict-Transport-Security: max-age=31536000; includeSubDomains
-    # < Public-Key-Pins: pin-sha256="..."; max-age=2592000
 
 Troubleshooting
 ---------------

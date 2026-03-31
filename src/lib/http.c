@@ -330,24 +330,31 @@ void log_request(const struct mg_request_info *request_info, char *request_id,
  * Call AFTER the status line and content-specific headers but BEFORE the
  * blank line (\r\n) that ends the header block.
  *
- * Headers sent on every response:
+ * Headers sent on every response (HTTP and HTTPS):
  *   X-Content-Type-Options  – prevent MIME-type sniffing
  *   X-Frame-Options         – deny framing (clickjacking protection)
  *   Referrer-Policy         – suppress Referer on outbound navigations
  *   Content-Security-Policy – restrict resource origins; allow inline styles
  *                             (needed for the built-in HTML status page)
- *   Cache-Control           – do not cache responses (each TS reply is unique)
+ *   Cache-Control           – prevent caching of timestamp tokens
  *
- * Headers sent only when the connection is already TLS (is_ssl != 0):
- *   Strict-Transport-Security – HSTS: instruct browsers to always use HTTPS
- *   Public-Key-Pins           – HPKP: pin the TSA signing cert's SPKI so that
- *                               fake certificates issued by a rogue CA are
- *                               rejected by the browser (only when a pin was
- *                               computed successfully at startup)
+ * Header sent only when the connection is TLS (is_ssl != 0):
+ *   Strict-Transport-Security – HSTS: instruct clients to always use HTTPS
+ *
+ * Note: HTTP Public Key Pinning (HPKP, RFC 7469) is intentionally omitted.
+ * It was removed from all major browsers (Chrome 72+, Firefox) and is not
+ * implemented by the CLI tools (openssl ts, curl) or language libraries
+ * (BouncyCastle, .NET) that typically talk to a TSA.  Sending a header that
+ * nothing honours adds no security but would introduce real operational risk:
+ * a misconfigured or expired pin could permanently lock out every client that
+ * does happen to enforce it.  Better alternatives for certificate trust in a
+ * TSA context are CAA DNS records (restrict which CAs may issue for your
+ * domain) and Certificate Transparency (CT) monitoring.
  */
 static void add_security_headers(struct mg_connection *conn,
                                  const rfc3161_context *ct) {
     const struct mg_request_info *ri = mg_get_request_info(conn);
+    (void)ct; /* reserved for future per-context header customisation */
 
     mg_printf(conn,
               "X-Content-Type-Options: nosniff\r\n"
@@ -362,14 +369,6 @@ static void add_security_headers(struct mg_connection *conn,
         mg_printf(conn,
                   "Strict-Transport-Security:"
                   " max-age=31536000; includeSubDomains\r\n");
-
-        /* HPKP: 30-day pin of the TSA signing certificate's SPKI */
-        if (ct->hpkp_pin[0] != '\0') {
-            mg_printf(conn,
-                      "Public-Key-Pins:"
-                      " pin-sha256=\"%s\"; max-age=2592000\r\n",
-                      ct->hpkp_pin);
-        }
     }
 }
 
