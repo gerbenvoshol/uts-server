@@ -229,6 +229,204 @@ Then set ``run_as_user = uts-server`` in the ``[ main ]`` section:
     [ main ]
     run_as_user = uts-server
 
+Optional chroot / filesystem isolation
+---------------------------------------
+
+uts-server supports an optional chroot jail via the ``-r CHROOT_DIR``
+(``--chroot-dir``) command-line flag.  When this flag is given the process
+calls ``chroot(2)`` and ``chdir("/")`` *before opening or parsing* any
+configuration file or network socket, so the entire server lifetime (config
+parsing, PKI loading, TLS handshakes, serving) operates within the jail.
+
+Why chroot here works cleanly
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Most servers struggle with chroot because they keep reading files at
+runtime (e.g. a serial-number file updated on every request).
+uts-server has no such requirement:
+
+* **Serial numbers** are generated with ``RAND_bytes()`` — no file I/O.
+* **Signing cert and private key** are loaded into OpenSSL memory once at
+  startup by ``create_tsctx()``; after that, signing never touches the
+  filesystem.
+* **``/ca.pem`` and ``/tsa_cert.pem`` download endpoints** re-read their
+  files per request, so those PEM files must be inside the jail.
+* **TLS certificate / key** (optional) is opened by civetweb during
+  ``mg_start()``, which runs after the chroot, so it must also be inside
+  the jail.
+
+.. note::
+
+    ``chroot(2)`` requires root or the ``CAP_SYS_CHROOT`` Linux capability.
+    The typical pattern is: start as root, pass ``-r CHROOT_DIR``, and also
+    set ``run_as_user`` in the configuration so that civetweb drops
+    privileges inside the jail after opening the listening socket.
+
+Setting up the jail directory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The jail must contain the configuration file and all files it references.
+A minimal layout for a plain-HTTP deployment:
+
+.. sourcecode:: text
+
+    /srv/uts-server/                  ← CHROOT_DIR (-r argument)
+    ├── uts-server.cnf                ← config file (-c /uts-server.cnf)
+    └── pki/
+        ├── tsacert.pem
+        ├── cacert.pem
+        └── private/
+            └── tsakey.pem           ← chmod 400, owned by uts-server
+
+For a TLS deployment add the combined server key+cert PEM:
+
+.. sourcecode:: text
+
+    /srv/uts-server/
+    └── server.pem                    ← ssl_certificate = /server.pem
+
+Create the structure and copy files:
+
+.. sourcecode:: bash
+
+    JAIL=/srv/uts-server
+    sudo mkdir -p $JAIL/pki/private
+
+    # Copy PKI files from their current location into the jail
+    sudo cp /etc/uts-server/pki/tsacert.pem  $JAIL/pki/
+    sudo cp /etc/uts-server/pki/cacert.pem   $JAIL/pki/
+    sudo cp /etc/uts-server/pki/private/tsakey.pem $JAIL/pki/private/
+
+    # Lock down the private key
+    sudo chown root:uts-server $JAIL/pki/private/tsakey.pem
+    sudo chmod 400 $JAIL/pki/private/tsakey.pem
+
+    # Copy / create the configuration file inside the jail.
+    # All [ tsa ] paths use the jail-relative root ("/pki/…" not "/etc/…").
+    sudo cp /etc/uts-server/uts-server.cnf $JAIL/uts-server.cnf
+
+The configuration file inside the jail must reference paths as they appear
+**inside the jail** (i.e. starting from ``/``):
+
+.. sourcecode:: ini
+
+    [ tsa ]
+    dir         = /pki
+    signer_cert = $dir/tsacert.pem
+    certs       = $dir/cacert.pem
+    signer_key  = $dir/private/tsakey.pem
+
+Launch with the ``-r`` flag, pointing ``-c`` at the jail-relative path:
+
+.. sourcecode:: bash
+
+    sudo uts-server -r /srv/uts-server -c /uts-server.cnf -D
+
+For daemon mode with a PID file (the path is also jail-relative):
+
+.. sourcecode:: bash
+
+    sudo mkdir -p /srv/uts-server/run
+    sudo uts-server \
+        -r /srv/uts-server \
+        -c /uts-server.cnf \
+        -d \
+        -p /run/uts-server.pid
+
+The PID file will be created at ``/srv/uts-server/run/uts-server.pid`` on
+the real filesystem (visible as ``/run/uts-server.pid`` inside the jail).
+
+Syslog inside a chroot
+~~~~~~~~~~~~~~~~~~~~~~~
+
+uts-server calls ``openlog()`` with ``LOG_NDELAY`` **before** performing
+the chroot so that the Unix socket connection to ``/dev/log`` is established
+on the real filesystem.
+
+For **foreground mode** (``-D``, no ``-d``) this is sufficient: the socket
+fd remains open throughout the process lifetime.
+
+For **daemon mode** (``-d``) the double-fork closes all file descriptors,
+including the syslog socket.  uts-server then calls ``openlog()`` again
+after the fork — but inside the jail ``/dev/log`` is not accessible, so
+syslog silently fails.  To keep syslog working in daemon-inside-chroot
+mode, either:
+
+1. **Bind-mount** the real ``/dev/log`` into the jail at startup
+   (requires systemd or a manual mount in the init script):
+
+   .. sourcecode:: bash
+
+       # Create the mount point
+       sudo mkdir -p /srv/uts-server/dev
+       # Bind-mount /dev/log
+       sudo mount --bind /dev/log /srv/uts-server/dev/log
+
+2. **Use stdout logging** and let systemd/journald capture it:
+
+   .. sourcecode:: ini
+
+       [ main ]
+       log_to_syslog = no
+       log_to_stdout = yes
+
+``run_as_user`` inside a chroot
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+civetweb's ``run_as_user`` option calls ``getpwnam(3)`` to look up the
+username, which requires ``/etc/passwd`` and ``/etc/group`` to be readable
+inside the jail.  Create minimal copies:
+
+.. sourcecode:: bash
+
+    JAIL=/srv/uts-server
+    sudo mkdir -p $JAIL/etc
+
+    # Extract just the uts-server entry
+    sudo grep '^uts-server:' /etc/passwd > $JAIL/etc/passwd
+    sudo grep '^uts-server:' /etc/group  > $JAIL/etc/group
+    # Also include the 'nobody' / 'nogroup' entries if needed
+    sudo grep '^nobody:'    /etc/passwd >> $JAIL/etc/passwd
+    sudo grep '^nogroup:'   /etc/group  >> $JAIL/etc/group
+    sudo chmod 644 $JAIL/etc/passwd $JAIL/etc/group
+
+Alternatively, drop privileges **before** the chroot: remove
+``run_as_user`` from the config and use systemd's ``User=`` directive (or
+``start-stop-daemon -c user:group``) which drops privileges before
+``exec``-ing the binary.  In that case the binary only needs
+``CAP_NET_BIND_SERVICE`` rather than ``CAP_SYS_CHROOT`` (which requires
+root).  See the systemd service example below.
+
+Systemd service with chroot
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Systemd provides its own ``RootDirectory=`` directive which is equivalent
+to ``chroot`` and integrates with the unit file lifecycle.  For most
+deployments this is simpler than passing ``-r`` manually:
+
+.. sourcecode:: ini
+
+    [Service]
+    Type=forking
+    User=uts-server
+    Group=uts-server
+    RootDirectory=/srv/uts-server
+    ExecStart=/usr/sbin/uts-server \
+        -c /uts-server.cnf \
+        -d \
+        -p /run/uts-server.pid
+    PIDFile=/srv/uts-server/run/uts-server.pid
+    RuntimeDirectory=uts-server
+    RuntimeDirectoryMode=0755
+
+With ``RootDirectory=`` systemd sets up ``/proc``, ``/dev/log``, and other
+pseudo-filesystems inside the jail automatically, so syslog works without
+extra configuration.
+
+Use ``-r CHROOT_DIR`` when you need the chroot to be applied by
+uts-server itself (e.g. in a SysV init or Docker environment without
+systemd's ``RootDirectory=``).
+
 Running as a systemd service
 -----------------------------
 
@@ -520,6 +718,102 @@ Each request generates a one-liner at ``info`` level:
 
 The ``Request[...]`` field is a prefix derived from the timestamp serial number and
 can be used to correlate debug lines with the request log entry.
+
+Security response headers
+-------------------------
+
+uts-server automatically injects the following HTTP security headers into **every**
+response, regardless of the endpoint or HTTP method:
+
++-----------------------------------+-------------------------------------------------+
+| Header                            | Value / Purpose                                 |
++===================================+=================================================+
+| ``X-Content-Type-Options``        | ``nosniff`` — prevents MIME-type sniffing       |
++-----------------------------------+-------------------------------------------------+
+| ``X-Frame-Options``               | ``DENY`` — blocks clickjacking via iframe       |
++-----------------------------------+-------------------------------------------------+
+| ``Referrer-Policy``               | ``no-referrer`` — suppresses Referer leakage    |
++-----------------------------------+-------------------------------------------------+
+| ``Content-Security-Policy``       | ``default-src 'none'; style-src 'unsafe-inline``|
+|                                   | ``'`` — allows only inline styles (needed for   |
+|                                   | the built-in status page), blocks all external  |
+|                                   | resources and scripts                           |
++-----------------------------------+-------------------------------------------------+
+| ``Cache-Control``                 | ``no-store`` — prevents caching of timestamp    |
+|                                   | tokens and certificate downloads                |
++-----------------------------------+-------------------------------------------------+
+
+The following header is sent **only on HTTPS connections** (``is_ssl = 1``):
+
+HTTP Strict Transport Security (HSTS)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. sourcecode:: text
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+HSTS instructs clients to always use HTTPS for the hostname (and all subdomains)
+for the next year.  This mitigates protocol-downgrade and cookie-hijacking attacks.
+
+.. note::
+
+    HSTS only takes effect when the server terminates TLS directly
+    (``ssl_certificate`` set in ``[ main ]``) or when a TLS-terminating reverse
+    proxy forwards the header.  HSTS is ignored on plain HTTP connections.
+
+Why HPKP is not implemented
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+HTTP Public Key Pinning (HPKP, RFC 7469) was explicitly considered and
+**intentionally left out** for the following reasons:
+
+1. **It has no audience in the TSA context.**  HPKP was removed from Chrome 72
+   (January 2019) and is disabled by default in Firefox.  The clients that actually
+   talk to a TSA — ``openssl ts``, ``curl``, Java BouncyCastle, .NET
+   ``System.Security.Cryptography``, Windows ``signtool`` — have never implemented
+   it.  A header that nothing enforces provides zero security benefit.
+
+2. **The risk–benefit ratio is inverted.**  A misconfigured or forgotten pin with a
+   long ``max-age`` value can permanently lock out every client that *does* honour it,
+   with no recovery path short of waiting for the pin to expire.  RFC 7469 itself
+   lists "hostile pinning" as a primary threat vector.
+
+3. **Better alternatives exist for the same threat model** (a rogue CA issuing a
+   fraudulent certificate for your TSA hostname):
+
+   * **CAA DNS records** — restrict which certificate authorities are permitted to
+     issue certificates for your domain:
+
+     .. sourcecode:: text
+
+         tsa.example.com. IN CAA 0 issue "letsencrypt.org"
+         tsa.example.com. IN CAA 0 issuewild ";"
+
+   * **Certificate Transparency (CT) monitoring** — enrol in a CT log monitoring
+     service (e.g. `crt.sh <https://crt.sh>`_) to receive alerts when any CA
+     issues a certificate for your hostname.
+
+   * **Explicit trust anchors in clients** — TSA clients should be configured with
+     the specific CA certificate (``-CAfile /etc/uts-server/pki/tsaca.pem``) rather
+     than relying on the system trust store.  This is a far stronger guarantee than
+     HPKP because it works independently of browser support.
+
+Verifying headers with curl
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. sourcecode:: bash
+
+    curl -Isv http://tsa.example.com:318/ 2>&1 | grep "< "
+    # Expected (HTTP):
+    # < X-Content-Type-Options: nosniff
+    # < X-Frame-Options: DENY
+    # < Referrer-Policy: no-referrer
+    # < Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'
+    # < Cache-Control: no-store
+
+    curl -Isv https://tsa.example.com:3161/ 2>&1 | grep "< "
+    # Expected (HTTPS — additional headers):
+    # < Strict-Transport-Security: max-age=31536000; includeSubDomains
 
 Troubleshooting
 ---------------

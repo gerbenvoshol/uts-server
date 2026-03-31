@@ -62,3 +62,4 @@ vendor/
 _build/
 configure.rst
 docs/configure.rst
+tests/cfg/tmp.*
