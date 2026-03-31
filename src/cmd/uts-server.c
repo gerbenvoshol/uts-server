@@ -1,6 +1,7 @@
 #include "http.h"
 #include <argp.h>
 #include <ctype.h>
+#include <errno.h>
 #include <getopt.h>
 #include <libgen.h>
 #include <limits.h>
@@ -22,14 +23,18 @@ const char *argp_program_bug_address =
 static char doc[] = "\nUTS micro timestamp server (RFC 3161)";
 
 static struct argp_option options[] = {
-    {"conffile", 'c', "CONFFILE", 0, "Path to configuration file"},
-    {"daemonize", 'd', 0, 0, "Launch as a daemon"},
-    {"pidfile", 'p', "PIDFILE", 0, "Path to pid file"},
-    {"debug", 'D', 0, 0, "STDOUT debugging"},
+    {"conffile",   'c', "CONFFILE",   0, "Path to configuration file"},
+    {"daemonize",  'd', 0,            0, "Launch as a daemon"},
+    {"pidfile",    'p', "PIDFILE",    0, "Path to pid file"},
+    {"debug",      'D', 0,            0, "STDOUT debugging"},
+    {"chroot-dir", 'r', "CHROOT_DIR", 0,
+     "Chroot to this directory before starting (requires root or "
+     "CAP_SYS_CHROOT); all other paths (-c, -p, config) are resolved "
+     "relative to this root after the chroot"},
     {0}};
 
 /* A description of the arguments we accept. */
-static char args_doc[] = "-c CONFFILE [-d] [-D] [-p <pidfile>]";
+static char args_doc[] = "-c CONFFILE [-r CHROOT_DIR] [-d] [-D] [-p <pidfile>]";
 
 struct arguments {
     char *args[2]; /* arg1 & arg2 */
@@ -37,6 +42,7 @@ struct arguments {
     bool stdout_dbg;
     char *conffile;
     char *pidfile;
+    char *chroot_dir;
 };
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
@@ -57,6 +63,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     case 'p':
         arguments->pidfile = arg;
         break;
+    case 'r':
+        arguments->chroot_dir = arg;
+        break;
     default:
         return ARGP_ERR_UNKNOWN;
     }
@@ -72,8 +81,35 @@ int main(int argc, char **argv) {
     args.pidfile = NULL;
     args.daemonize = 0;
     args.stdout_dbg = 0;
+    args.chroot_dir = NULL;
     argp_parse(&argp, argc, argv, 0, 0, &args);
     int ret = EXIT_SUCCESS;
+
+    /* --- Optional chroot -------------------------------------------------- *
+     * Open syslog with LOG_NDELAY first so the socket to the real /dev/log    *
+     * is established before we enter the jail.  All subsequent path           *
+     * arguments (-c, -p) are treated as absolute paths inside the chroot.     *
+     * The chroot must happen before realpath() so that path resolution is     *
+     * anchored to the new root.  It also happens before mg_start(), which     *
+     * is important because civetweb opens the SSL certificate file and drops  *
+     * privileges (run_as_user) inside mg_start().                             *
+     * ----------------------------------------------------------------------- */
+    if (args.chroot_dir != NULL) {
+        openlog("uts-server", LOG_PID | LOG_NDELAY, LOG_DAEMON);
+        if (chroot(args.chroot_dir) != 0) {
+            syslog(LOG_CRIT, "chroot('%s') failed: %s",
+                   args.chroot_dir, strerror(errno));
+            closelog();
+            return EXIT_FAILURE;
+        }
+        if (chdir("/") != 0) {
+            syslog(LOG_CRIT, "chdir('/') after chroot failed: %s",
+                   strerror(errno));
+            closelog();
+            return EXIT_FAILURE;
+        }
+        syslog(LOG_NOTICE, "chroot to '%s' succeeded", args.chroot_dir);
+    }
 
     // get the full path of the configuration (daemon -> chdir to / concequently
     // full path is necessary)

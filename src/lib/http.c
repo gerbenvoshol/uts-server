@@ -509,7 +509,7 @@ int rfc3161_handler(struct mg_connection *conn, void *context) {
             add_security_headers(conn, ct);
             mg_printf(conn, "\r\nuts-server error");
         }
-        OPENSSL_cleanse(query, (size_t)query_len);
+        OPENSSL_cleanse(query, (size_t)request_info->content_length);
         free(query);
         free(content);
     } else {
@@ -583,7 +583,7 @@ int cert_serve_handler(struct mg_connection *conn, void *context) {
     if (strlen(filename) == 0) {
         uts_logger(context, LOG_NOTICE,
                    "'signer_cert' param in '[ tsa ]' section not filed");
-        mg_send_http_error(conn, 404, "Signer certificate not available");
+        mg_send_http_error(conn, 404, "Signer certificate path not configured");
         diff = clock() - start;
         log_request(request_info, "CERT_DL", ct, 404,
                     (diff * 1000000 / CLOCKS_PER_SEC));
@@ -598,7 +598,7 @@ int cert_serve_handler(struct mg_connection *conn, void *context) {
     } else {
         uts_logger(context, LOG_NOTICE,
                    "Signer certificate file '%s' not available", filename);
-        mg_send_http_error(conn, 404, "Signer certificate not available");
+        mg_send_http_error(conn, 404, "Signer certificate file not found");
         diff = clock() - start;
         log_request(request_info, "CERT_DL", ct, 404,
                     (diff * 1000000 / CLOCKS_PER_SEC));

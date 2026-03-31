@@ -126,8 +126,13 @@ void skeleton_daemon() {
         close(x);
     }
 
-    /* Open the log file */
-    // openlog("uts-server", LOG_PID, LOG_DAEMON);
+    /* Re-open syslog after closing all fds.  The fd close loop above shuts
+     * the syslog socket that was opened (lazily or via LOG_NDELAY) before the
+     * double-fork.  Without this call, subsequent syslog() calls silently fail
+     * in daemon mode.  LOG_NDELAY connects immediately; if the process is
+     * running inside a chroot that lacks /dev/log the call fails gracefully
+     * (syslog output is lost, but the process keeps running). */
+    openlog("uts-server", LOG_PID | LOG_NDELAY, LOG_DAEMON);
 }
 
 // log a binary blob as hexadecimal
